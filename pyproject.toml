@@ -1,0 +1,23 @@
+[project]
+name = "tg-bot-assistant"
+version = "0.1.0"
+description = "Personal Telegram assistant"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "faster-whisper>=1.1,<2",
+    # faster-whisper 1.2 uses av.open(metadata_errors=...), removed in newer PyAV.
+    "av>=11,<17",
+    "aiohttp>=3.10,<4",
+    "aiogram>=3.13,<4",
+    "pydantic-settings>=2.6,<3",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.30,<1",
+    "alembic>=1.14,<2",
+    "tzdata>=2025.1",
+    "google-api-python-client>=2.150,<3",
+    "google-auth-oauthlib>=1.2,<2",
+    "google-auth-httplib2>=0.2,<1",
+]
+
+[tool.uv]
+package = false
