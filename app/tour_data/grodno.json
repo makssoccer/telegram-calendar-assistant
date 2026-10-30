@@ -1,0 +1,32 @@
+{
+  "city": "Гродно, Беларусь",
+  "checked_at": "2026-10-30",
+  "places": [
+    {"id":"station", "name":"Железнодорожный вокзал", "lon":23.848590, "lat":53.686549, "visit_minutes":0,
+     "coordinate_source":"https://www.tourister.ru/world/europe/belarus/city/hrodna/railstations/31040"},
+    {"id":"university", "name":"ГрГУ имени Янки Купалы, Ожешко, 22", "lon":23.839722, "lat":53.684722, "visit_minutes":5,
+     "coordinate_source":"https://ru.wikipedia.org/wiki/Гродненский_государственный_университет"},
+    {"id":"gilibert_park", "name":"Парк Жилибера", "lon":23.836091, "lat":53.684083, "visit_minutes":15,
+     "coordinate_source":"https://marshryt.by/poi/park-zhilibera/"},
+    {"id":"lenin_square", "name":"Площадь Ленина", "lon":23.834381, "lat":53.683839, "visit_minutes":5,
+     "coordinate_source":"https://commons.wikimedia.org/wiki/Category:Lenin_Square_in_Hrodna"},
+    {"id":"soviet_square", "name":"Советская площадь", "lon":23.829544, "lat":53.677658, "visit_minutes":15,
+     "coordinate_source":"https://marshryt.by/blog/poezdka-na-mashine-sovety-v-grodno-podrobnyy-gid-v-2026-godu/"},
+    {"id":"drama_theatre", "name":"Драматический театр", "lon":23.827706, "lat":53.675383, "visit_minutes":10,
+     "coordinate_source":"https://marshryt.by/poi/grodnenskij-dramaticheskij-teatr/"},
+    {"id":"old_castle", "name":"Старый замок", "lon":23.823496, "lat":53.677034, "visit_minutes":15,
+     "coordinate_source":"https://tripse.ru/excursions/belarus/grodno/sight-staryi-i-novyi-zamki-3739"},
+    {"id":"new_castle", "name":"Новый замок", "lon":23.824947, "lat":53.676297, "visit_minutes":10,
+     "coordinate_source":"https://problr.by/novyij-zamok.html"}
+  ],
+  "documents": [
+    {"id":"station_history", "place_id":"station", "title":"Вокзал: начало железнодорожной истории", "text":"Первое здание вокзала в Гродно построили в 1862 году. Вокзал неоднократно перестраивали; в XX веке его сменило более крупное современное здание. Адрес вокзала — улица Будённого, 37.", "url":"https://www.tourister.ru/world/europe/belarus/city/hrodna/railstations/31040"},
+    {"id":"university_history", "place_id":"university", "title":"Университет: институт и имя поэта", "text":"История университета началась с учительского института, основанного в Гродно в 1940 году. В 1944 году институт стал педагогическим. Имя Янки Купалы присвоили в 1957 году. Адрес главного корпуса — улица Ожешко, 22.", "url":"https://ru.wikipedia.org/wiki/Гродненский_государственный_университет"},
+    {"id":"park_garden", "place_id":"gilibert_park", "title":"Жилибер и ботанический сад", "text":"Жан Эммануэль Жилибер был французским врачом и учёным. В 1775 году здесь заложили ботанический сад, использовавшийся для обучения в медицинской академии. Исторические посадки почти не сохранились. Парк связан с долиной реки Городничанки.", "url":"https://www.grodnogo.by/place/park-zhilibera"},
+    {"id":"lenin_square_history", "place_id":"lenin_square", "title":"Площадь Ленина и Городничанка", "text":"Современную площадь Ленина сформировали в 1980-х годах. Для расширения пространства частично засыпали русло Городничанки. Старая площадь Ленина теперь носит имя Тизенгауза.", "url":"https://ru.wikipedia.org/wiki/Площадь_Ленина_(Гродно)"},
+    {"id":"soviet_square_history", "place_id":"soviet_square", "title":"Советская площадь: городской перекрёсток", "text":"Советская площадь соединяет несколько улиц исторического центра, в том числе Советскую, Замковую и Мостовую. В прошлом здесь располагался рынок. В 1389 году Витовт заложил деревянный храм на западной стороне площади.", "url":"https://ru.wikipedia.org/wiki/Советская_площадь_(Гродно)"},
+    {"id":"theatre_history", "place_id":"drama_theatre", "title":"Театр: труппа и здание", "text":"Гродненский областной драматический театр появился в 1947 году. Современное здание построили в 1984 году на месте бывшего монастыря бернардинок. Это одно из узнаваемых зданий Гродно.", "url":"https://ldd.by/map_points/grodno-oblastnoj-dramaticheskij-teatr/"},
+    {"id":"old_castle_history", "place_id":"old_castle", "title":"Старый замок: королевская резиденция", "text":"Старый замок включает сооружения разных эпох. Во второй половине XVI века для Стефана Батория построили королевский дворец. Позднее дворец неоднократно перестраивали в XVII–XIX веках.", "url":"https://marshryt.by/poi/grodnenskij-istoriko-arheologicheskij-muzej/"},
+    {"id":"new_castle_history", "place_id":"new_castle", "title":"Новый замок: дворец и сеймы", "text":"Новый замок возвели в XVIII веке при Августе III как королевскую резиденцию и место проведения сеймов Речи Посполитой. Название связано с расположением напротив Старого замка. На въездных воротах установлены скульптуры сфинксов.", "url":"https://www.grodnogo.by/place/novyi-zamok"}
+  ]
+}

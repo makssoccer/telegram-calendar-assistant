@@ -11,10 +11,30 @@ from aiogram.types import Message, TelegramObject, CallbackQuery, InlineKeyboard
 from app.drafts import DraftStore, EventDraft
 from app.changes import EventChange
 from app.voice import VoiceService, VoiceError
+from app.tourism import WalkRequest
+from app.walking import WalkingError
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 from app.calendar import CalendarService, CalendarError, CalendarConflict, day_bounds, format_events
 from app.agent import Agent, AgentError
+
+
+def reply_chunks(text: str, limit: int = 1800):
+    # Сначала делим по абзацам: описание остановки и ссылка остаются вместе.
+    # Запасной разрез по строке/пробелу нужен для длинных ответов модели.
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit + 1)
+        if cut <= 0:
+            cut = text.rfind("\n", 0, limit + 1)
+        if cut <= 0:
+            cut = text.rfind(" ", 0, limit + 1)
+        if cut <= 0:
+            cut = limit
+        yield text[:cut]
+        text = text[cut:].lstrip()
+    if text:
+        yield text
 
 
 class OwnerOnlyMiddleware(BaseMiddleware):
@@ -50,6 +70,39 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
     router = Router(name="personal-assistant")
     router.message.outer_middleware(OwnerOnlyMiddleware(owner_id))
     voice_service = VoiceService()
+
+    @router.message(Command("places", "walk"))
+    async def tourism_command(message: Message) -> None:
+        # Команды обходят LLM: каталог доступен даже без облачной модели,
+        # для /walk нужен только ключ сервиса пеших переходов.
+        if agent is None or agent.tourism is None:
+            await message.answer("Прогулки пока не настроены.")
+            return
+        parts = message.text.split()
+        if parts[0].split("@")[0] == "/places":
+            await message.answer("Гродно: точки в порядке прогулки\n\n" + "\n".join(
+                f"{p['id']} — {p['name']}" for p in agent.tourism.places.values())
+                + "\n\n/walk 120 — от вокзала, без возврата\n/walk 120 return — с возвратом к вокзалу\n"
+                  "Можно написать: «Прогулка на 2 часа от университета» или «Расскажи про парк Жилибера».")
+            return
+        if len(parts) not in (2, 3) or (len(parts) == 3 and parts[2] != "return"):
+            await message.answer("Пример: /walk 120 или /walk 120 return. Длительность 60–180 минут.")
+            return
+        try:
+            request = WalkRequest(budget_minutes=int(parts[1]), return_to_start=len(parts) == 3)
+        except (ValueError, ValidationError):
+            await message.answer("Укажи целое число минут от 60 до 180: /walk 120.")
+            return
+        await message.answer("Рассчитываю пешие переходы…")
+        try:
+            async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+                answer = await agent.tourism.plan(request)
+            await agent.history.append([{"role": "user", "content": message.text},
+                                        {"role": "assistant", "content": answer}])
+        except WalkingError as exc:
+            answer = str(exc)
+        for chunk in reply_chunks(answer):
+            await message.answer(chunk, disable_web_page_preview=True)
 
     @router.message(Command("reminders_on", "reminders_off"))
     async def toggle_reminders(message: Message) -> None:
@@ -122,11 +175,15 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
             "Личный помощник запущен.\n\n"
             "/ping — проверить связь\n"
             "/help — показать команды\n"
+            "/places — места прогулки по Гродно\n"
+            "/walk 120 — прогулка на 2 часа от вокзала\n"
+            "/walk 120 return — включить возврат к вокзалу\n"
             "/today — события Google Calendar за сегодня\n"
             "/reset — забыть контекст диалога\n\n"
             "/reminders_on — включить напоминания за 15 минут\n"
             "/reminders_off — выключить напоминания\n\n"
             "Можно спросить: «Что у меня завтра?» или «Покажи встречи на неделю».\n"
+            "Для прогулок: «Маршрут по Гродно на 2 часа». Для рассказа по источникам: «Расскажи про Старый замок».\n"
             "Можно отправить голосовое на русском до 60 секунд: распознавание локальное, затем текст получает облачная модель.\n"
             "Для создания: «Добавь завтра в 15:00 встречу с командой на час». Затем подтверди кнопкой.\n"
             "Можно указать email участников: «Создай завтра в 15:00 встречу с ivan@example.com на полчаса».\n"
@@ -216,8 +273,8 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
                     InlineKeyboardButton(text=button, callback_data=f"confirm:{draft_id}"),
                     InlineKeyboardButton(text="Не выполнять", callback_data=f"cancel:{draft_id}")]]))
             return
-        for i in range(0, len(answer), 1800):
-            await message.answer(answer[i:i + 1800])
+        for chunk in reply_chunks(answer):
+            await message.answer(chunk, disable_web_page_preview=True)
 
     @dispatcher.errors()
     async def on_error(event: Any) -> bool:

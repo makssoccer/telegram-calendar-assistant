@@ -43,6 +43,7 @@ class Settings(DatabaseSettings):
     google_token_path: Path = Path("secrets/google-token.json")
     openrouter_api_key: SecretStr = SecretStr("")
     openrouter_model: str = "openrouter/free"
+    ors_api_key: SecretStr = SecretStr("")
 
     @field_validator("openrouter_model")
     @classmethod

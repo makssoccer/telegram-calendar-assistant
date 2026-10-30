@@ -18,6 +18,8 @@ from app.history import HistoryStore
 from app.reminders import ReminderStore, ReminderService
 from app.storage import check_database, create_engine
 from app.telegram_bot import create_dispatcher
+from app.tourism import TourismService
+from app.walking import WalkingClient
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +43,9 @@ async def run(settings: Settings) -> None:
             session=AiohttpSession(timeout=40),
         ) as bot:
             calendar = CalendarService(settings.google_calendar_id, settings.google_token_path, settings.user_timezone)
+            tourism = TourismService(WalkingClient(settings.ors_api_key.get_secret_value()))
             agent = Agent(calendar, settings.openrouter_api_key.get_secret_value(), settings.openrouter_model,
-                          HistoryStore(engine, settings.owner_telegram_id))
+                          HistoryStore(engine, settings.owner_telegram_id), tourism)
             reminder_store = ReminderStore(engine, settings.owner_telegram_id, settings.google_calendar_id)
             await reminder_store.initialize()
             reminders = ReminderService(calendar, bot, reminder_store)
