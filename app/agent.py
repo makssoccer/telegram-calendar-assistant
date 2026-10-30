@@ -48,7 +48,7 @@ TOOLS = [{"type": "function", "function": {
 }}]
 TOOLS.append({"type": "function", "function": {
     "name": "prepare_event",
-    "description": "Prepare one event for explicit button confirmation. Does NOT create it. Ask for missing title, date or time; default duration 60 minutes if unspecified. No attendees or recurring events.",
+    "description": "Prepare one event for explicit button confirmation. Does NOT create or invite yet. Ask for missing title, date or time; default duration 60 minutes. attendees: up to five explicit email addresses from the user; never invent emails. Ask for email if user wants to invite someone without an address. No recurring events.",
     "parameters": EventDraft.model_json_schema(),
 }})
 TOOLS.append({"type": "function", "function": {
@@ -165,6 +165,9 @@ class Agent:
             "История может устареть. Не выдумывай события. Пустой список означает отсутствие событий, "
             "ошибка инструмента НЕ означает пустое расписание. При truncated сообщи о сокращении списка. "
             "Для создания вызови prepare_event: это только черновик, пользователь подтвердит его кнопкой. "
+            "При создании можно пригласить до пяти участников: передай явно указанные пользователем email в attendees. "
+            "Если нужно приглашение, но email не указан, спроси адрес; не придумывай его и не создавай встречу без участника. "
+            "Приглашение запрашивается только после кнопки «Создать и отправить приглашение»; доставка письма не гарантируется. "
             "Если нет названия, даты или времени начала, уточни. По умолчанию длительность 60 минут. "
             "Явная длительность важнее значения по умолчанию: «в десять утра, десятиминутный мит» "
             "означает 10:00–10:10, а не 10:10–11:10. Название — краткая суть встречи без даты, времени "
@@ -174,7 +177,8 @@ class Agent:
             "Для переноса или удаления используй prepare_change: это только черновик с подтверждением кнопкой. "
             "Уточни исходную дату и название, если их нельзя установить из разговора. Для переноса уточни новое время. "
             "При нескольких совпадениях спроси пользователя; не выбирай встречу сам. "
-            "Участники, повторения и изменение событий на весь день не поддерживаются. "
+            "Перенос и удаление встреч с участниками пока не поддерживаются; создание с email поддерживается. "
+            "Повторения и изменение событий на весь день не поддерживаются. "
             "У приложения есть фоновые напоминания примерно за 15 минут до встречи. "
             "Их включают /reminders_on и выключают /reminders_off; ты не можешь менять их настройки инструментами "
             "и не знаешь текущее состояние. При просьбе настроить напоминания укажи эти команды. "
@@ -236,7 +240,7 @@ class Agent:
                                     if draft.start <= datetime.now(self.calendar.timezone):
                                         raise ValueError("Past event")
                                 except (ValidationError, ValueError):
-                                    raise AgentError("Не удалось подготовить встречу. Укажи название, будущую дату, время и длительность.") from None
+                                    raise AgentError("Не удалось подготовить встречу. Проверь название, будущую дату, время, длительность и email участников (до пяти адресов).") from None
                                 return draft
                             result = await self._tool(call["function"]["name"], call["function"]["arguments"])
                             # tool_call_id связывает результат инструмента

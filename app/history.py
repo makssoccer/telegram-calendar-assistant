@@ -54,7 +54,8 @@ def action_receipt(draft, status):
     # Кнопку обрабатывает обычный код. Программно добавляем результат
     # в разговор, чтобы следующий запрос модели знал об этом действии.
     details = json.dumps({"title": draft["title"], "start": draft["starts_at"].isoformat(),
-                          "end": draft["ends_at"].isoformat()}, ensure_ascii=False)
+                          "end": draft["ends_at"].isoformat(),
+                          "attendees": draft.get("attendees") or []}, ensure_ascii=False)
     operation = draft.get("operation", "create")
     labels = {"create": "Создать", "move": "Перенести", "delete": "Удалить встречу"}
     results = {"create": "Google Calendar подтвердил создание встречи",
@@ -62,6 +63,8 @@ def action_receipt(draft, status):
                "delete": "Google Calendar подтвердил отсутствие встречи после запроса удаления"}
     action = labels[operation] if status == "created" else "Не выполнять"
     result = results[operation] if status == "created" else "Черновик отменён, действие не выполнялось"
+    if status == "created" and operation == "create" and draft.get("attendees"):
+        result += "; отправка приглашений запрошена у Google, доставка писем не проверена"
     return [
         {"role": "user", "content": f"[Нажата кнопка «{action}» для встречи {details}]"},
         {"role": "assistant", "content": f"{result}: {details}. Это результат действия на тот момент; актуальное расписание проверяется через list_events."},

@@ -110,6 +110,8 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
         end = draft["ends_at"].astimezone(calendar.timezone)
         label = {"create": "Создано в Google Calendar", "move": "Встреча перенесена",
                  "delete": "Встреча удалена или уже отсутствовала в календаре"}[draft["operation"]]
+        if draft["operation"] == "create" and draft.get("attendees"):
+            label += " (отправка приглашений запрошена у Google)"
         await query.message.edit_text(f"{label}: {draft['title']}\n{start:%d.%m.%Y %H:%M} — {end:%d.%m.%Y %H:%M}\n{calendar.timezone}")
 
     @router.message(Command("start", "help"))
@@ -127,6 +129,7 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
             "Можно спросить: «Что у меня завтра?» или «Покажи встречи на неделю».\n"
             "Можно отправить голосовое на русском до 60 секунд: распознавание локальное, затем текст получает облачная модель.\n"
             "Для создания: «Добавь завтра в 15:00 встречу с командой на час». Затем подтверди кнопкой.\n"
+            "Можно указать email участников: «Создай завтра в 15:00 встречу с ivan@example.com на полчаса».\n"
             "Для переноса: «Перенеси завтрашнюю встречу с командой на 16:00».\n"
             "Для удаления: «Отмени завтра встречу Проверка бота». Действия требуют подтверждения.\n"
             "Перенос и удаление пока доступны для обычных встреч без участников и повторений.\n"
@@ -195,12 +198,17 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
             end = answer.end.astimezone(calendar.timezone)
             operation = getattr(answer, "operation", "create")
             button = {"create": "Создать", "move": "Перенести", "delete": "Удалить встречу"}[operation]
+            if operation == "create" and answer.attendees:
+                button = "Создать и отправить приглашение"
             prompt = f"{button}?\n{answer.title}\n"
             if isinstance(answer, EventChange) and operation == "move":
                 old_start = answer.original_start.astimezone(calendar.timezone)
                 old_end = answer.original_end.astimezone(calendar.timezone)
                 prompt += f"Было: {old_start:%d.%m.%Y %H:%M} — {old_end:%d.%m.%Y %H:%M}\nБудет: "
             prompt += f"{start:%d.%m.%Y %H:%M} — {end:%d.%m.%Y %H:%M}\n"
+            if answer.attendees:
+                prompt += "Получатели приглашения:\n" + "\n".join(answer.attendees) + "\n"
+                prompt += "После подтверждения Google Calendar получит запрос на отправку приглашений.\n"
             await message.answer(
                 prompt +
                 f"Часовой пояс: {calendar.timezone}\nЧерновик действует 15 минут.",

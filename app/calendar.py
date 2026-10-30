@@ -254,9 +254,12 @@ class CalendarService:
                     body = {"id": draft["id"], "summary": draft["title"],
                             "start": {"dateTime": draft["starts_at"].isoformat()},
                             "end": {"dateTime": draft["ends_at"].isoformat()}}
+                    attendees = draft.get("attendees") or []
+                    if attendees:
+                        body["attendees"] = [{"email": email} for email in attendees]
                     try:
                         existing = events.insert(calendarId=draft["calendar_id"], body=body,
-                                                 sendUpdates="none").execute(num_retries=0)
+                                                 sendUpdates="all" if attendees else "none").execute(num_retries=0)
                     except HttpError as exc:
                         if exc.resp.status != 409:
                             raise

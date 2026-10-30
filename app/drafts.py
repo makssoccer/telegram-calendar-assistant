@@ -1,6 +1,8 @@
 """Persistent event drafts; Google event IDs remain stable across retries."""
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+import json
+import re
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
@@ -14,10 +16,22 @@ class EventDraft(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     start: AwareDatetime
     end: AwareDatetime
+    # Адреса являются частью неизменяемого подтверждения, а не параметром кнопки.
+    attendees: list[str] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode="after")
     def validate_interval(self):
         self.title = self.title.strip()
+        cleaned = []
+        for email in self.attendees:
+            email = email.strip()
+            if (len(email) > 254 or not re.fullmatch(
+                    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
+                    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", email)):
+                raise ValueError("Invalid attendee email")
+            if email.casefold() not in [e.casefold() for e in cleaned]:
+                cleaned.append(email)
+        self.attendees = cleaned
         if not self.title or not timedelta(0) < self.end - self.start <= timedelta(days=7):
             raise ValueError("Provide a title and a positive interval of at most seven days")
         return self
@@ -38,11 +52,12 @@ class DraftStore:
             # Черновик и его запись в историю фиксируются одной транзакцией.
             await c.execute(text("""INSERT INTO event_drafts
                 (id, owner_id, calendar_id, title, starts_at, ends_at, expires_at, status,
-                 operation, target_event_id, target_etag, original_start, original_end)
+                 operation, target_event_id, target_etag, original_start, original_end, attendees)
                 VALUES (:id, :owner, :calendar, :title, :start, :end, :expires, 'pending',
-                        :operation, :target, :etag, :original_start, :original_end)"""),
+                        :operation, :target, :etag, :original_start, :original_end, CAST(:attendees AS jsonb))"""),
                 dict(id=draft_id, owner=owner, calendar=calendar_id, title=draft.title,
                      start=draft.start, end=draft.end,
+                     attendees=json.dumps(draft.attendees),
                      # getattr читает атрибут или значение по умолчанию:
                      # operation есть у EventChange, но нет у EventDraft.
                      operation=getattr(draft, "operation", "create"),
