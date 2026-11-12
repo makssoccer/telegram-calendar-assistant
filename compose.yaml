@@ -23,6 +23,7 @@ services:
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
       GOOGLE_TOKEN_PATH: /app/secrets/google-token.json
       WHISPER_CACHE: /home/bot/models
+      EMBEDDING_CACHE: /home/bot/models/embeddings
       HF_HUB_DISABLE_TELEMETRY: "1"
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
