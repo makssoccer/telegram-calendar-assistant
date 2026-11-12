@@ -1,4 +1,9 @@
 import logging
+import asyncio
+import aiohttp
+from uuid import uuid4
+from app.place_choice import PLACES, PlaceChoice
+from dataclasses import replace
 from datetime import datetime
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -13,11 +18,13 @@ from app.changes import EventChange
 from app.voice import VoiceService, VoiceError
 from app.tourism import WalkRequest
 from app.walking import WalkingError
+from app.place_search import SearchRequest, SearchError
 from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 from app.calendar import CalendarService, CalendarError, CalendarConflict, day_bounds, format_events
 from app.agent import Agent, AgentError
+from app.knowledge_telegram import register_knowledge_handlers
 
 
 def reply_chunks(text: str, limit: int = 1800):
@@ -62,7 +69,7 @@ class OwnerOnlyMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, agent: Agent | None = None, drafts: DraftStore | None = None, reminders=None) -> Dispatcher:
+def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, agent: Agent | None = None, drafts: DraftStore | None = None, reminders=None, knowledge=None) -> Dispatcher:
     # Собираем маршруты входящих событий. Dispatcher — диспетчер,
     # Router — набор обработчиков. Вложенные функции используют зависимости
     # этой функции через замыкание, поэтому глобальные сервисы не нужны.
@@ -70,6 +77,26 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
     router = Router(name="personal-assistant")
     router.message.outer_middleware(OwnerOnlyMiddleware(owner_id))
     voice_service = VoiceService()
+    if knowledge is not None:
+        register_knowledge_handlers(router, knowledge, owner_id)
+
+    @router.message(Command("find"))
+    async def find_places(message: Message) -> None:
+        if agent is None:
+            await message.answer("Поиск пока не настроен.")
+            return
+        parts = message.text.split(maxsplit=1)
+        if len(parts) != 2 or not 1 <= len(parts[1].strip()) <= 500:
+            await message.answer("Напиши запрос до 500 символов, например:\n/find места, связанные с королями\n/find где погулять среди зелени")
+            return
+        await message.answer("Ищу места по смыслу в локальной базе…")
+        try:
+            async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+                answer = await agent.place_search.search(SearchRequest(query=parts[1].strip()))
+        except SearchError as exc:
+            answer = str(exc)
+        for chunk in reply_chunks(answer):
+            await message.answer(chunk, disable_web_page_preview=True)
 
     @router.message(Command("places", "walk"))
     async def tourism_command(message: Message) -> None:
@@ -113,6 +140,57 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
         await reminders.set_enabled(enabled)
         await message.answer("Напоминания включены: примерно за 15 минут до встречи, пока бот запущен."
                              if enabled else "Напоминания выключены.")
+
+    # Личный бот хранит один актуальный вопрос. Новый выбор заменяет старые кнопки.
+    pending_choice = None
+
+    async def show_choice(message, choice):
+        nonlocal pending_choice
+        token = uuid4().hex[:12]
+        options = choice.options or tuple(PLACES)
+        labels = {**PLACES, "walk": "Обычная прогулка", "find": "Поиск по теме",
+                  **{str(n): f"{n} минут" for n in (60, 120, 180)}}
+        buttons = [[InlineKeyboardButton(text=labels[key], callback_data=f"poi:{token}:{key}")] for key in options]
+        if choice.options and choice.action in ("story", "walk"):
+            buttons.append([InlineKeyboardButton(text="Другое место", callback_data=f"poi:{token}:other")])
+        prompt = choice.prompt()
+        if choice.action == "duration":
+            prompt = f"Старт: {PLACES[choice.start_id]}. Сколько времени выделить на прогулку?"
+        elif not choice.mention:
+            prompt = "Выбери место для этого запроса."
+        await message.answer(prompt, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        pending_choice = (token, choice, options)
+
+    @router.callback_query(lambda q: q.data and q.data.startswith("poi:"))
+    async def select_place(query: CallbackQuery):
+        nonlocal pending_choice
+        if query.from_user.id != owner_id or not isinstance(query.message, Message) or query.message.chat.type != ChatType.PRIVATE:
+            await query.answer()
+            return
+        parts = query.data.split(":")
+        if not pending_choice or len(parts) != 3 or parts[1] != pending_choice[0]:
+            await query.answer("Этот выбор уже закрыт. Повтори запрос.")
+            return
+        _, choice, options = pending_choice
+        key = parts[2]
+        if key not in options and not (key == "other" and choice.options and choice.action in ("story", "walk")):
+            await query.answer("Выбери предложенный вариант.")
+            return
+        pending_choice = None
+        await query.answer()
+        if key == "other":
+            await show_choice(query.message, replace(choice, options=()))
+            return
+        try:
+            async with ChatActionSender.typing(bot=query.bot, chat_id=query.message.chat.id):
+                answer = await agent.finish_choice(choice, key)
+        except (AgentError, WalkingError, SearchError, TimeoutError, aiohttp.ClientError) as exc:
+            answer = str(exc) or "Не удалось завершить запрос. Попробуй ещё раз."
+        if isinstance(answer, PlaceChoice):
+            await show_choice(query.message, answer)
+            return
+        for chunk in reply_chunks(answer):
+            await query.message.answer(chunk, disable_web_page_preview=True)
 
     @router.callback_query()
     async def confirm_event(query: CallbackQuery) -> None:
@@ -175,6 +253,10 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
             "Личный помощник запущен.\n\n"
             "/ping — проверить связь\n"
             "/help — показать команды\n"
+            "/find запрос — поиск мест по смыслу\n"
+            "/learn — добавить материал в базу знаний\n"
+            "/materials — список и удаление материалов\n"
+            "/cancel_material — отменить загрузку\n"
             "/places — места прогулки по Гродно\n"
             "/walk 120 — прогулка на 2 часа от вокзала\n"
             "/walk 120 return — включить возврат к вокзалу\n"
@@ -244,6 +326,9 @@ def create_dispatcher(owner_id: int, calendar: CalendarService | None = None, ag
                 answer = await agent.reply(request_text)
         except AgentError as exc:
             answer = str(exc)
+        if isinstance(answer, PlaceChoice):
+            await show_choice(message, answer)
+            return
         if isinstance(answer, EventDraft):
             # isinstance похож на instanceof. EventChange тоже пройдёт проверку,
             # потому что наследует EventDraft.

@@ -16,6 +16,9 @@ from app.changes import ChangeRequest, prepare_change
 from app.tourism import TourismService, WalkRequest, StoryRequest
 from app.walking import WalkingError
 from app.storytelling import StoryRetriever
+from dataclasses import replace
+from app.place_choice import PlaceChoice, PLACES, local_request, match_place, mention_in
+from app.place_search import PlaceSearch, SearchRequest, SearchError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,10 @@ logger = logging.getLogger(__name__)
 class AgentError(Exception):
     # Прикладное исключение: обработчик Telegram покажет его текст пользователю.
     pass
+
+
+class ModelOutputLimit(AgentError):
+    """Ответ оборван провайдером; частичные аргументы инструментов не исполняем."""
 
 
 class EventRange(BaseModel):
@@ -61,6 +68,9 @@ TOOLS.append({"type": "function", "function": {
 }})
 TOOLS.extend([
     {"type": "function", "function": {
+        "name": "search_places", "description": "Find Grodno catalog places by meaning, interests or topic using local embeddings and uploaded materials. Pass the full search request. Returns final candidates and source excerpts directly to user, not guaranteed matches or a route. Use for discovery when a specific place is not chosen.",
+        "parameters": SearchRequest.model_json_schema()}},
+    {"type": "function", "function": {
         "name": "list_places", "description": "Read the small Grodno walking catalog with stable place IDs and order. No live opening hours.",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
     {"type": "function", "function": {
@@ -76,7 +86,7 @@ class Agent:
     # Основной harness: координирует модель, инструменты и историю разговора.
     # Сам не пишет в календарь: возвращает черновик для подтверждения в Telegram.
     def __init__(self, calendar: CalendarService, api_key: str, model: str, history,
-                 tourism: TourismService | None = None):
+                 tourism: TourismService | None = None, knowledge=None):
         # __init__ инициализирует объект (похож на конструктор Java).
         # Зависимости передаются извне; их собирает app/__main__.py.
         self.calendar = calendar
@@ -84,21 +94,24 @@ class Agent:
         self.model = model
         self.history = history
         self.tourism = tourism
-        self.stories = StoryRetriever()
+        self.place_search = PlaceSearch(knowledge)
+        self.stories = StoryRetriever(knowledge, self.place_search)
 
     async def reset(self) -> None:
         # async def объявляет корутину. await ждёт результат, позволяя event loop
         # выполнять другую работу. Сам по себе await не создаёт отдельный поток.
         await self.history.clear()
 
-    async def _complete(self, session: aiohttp.ClientSession, messages: list[dict], *, use_tools: bool = True) -> dict:
+    async def _complete(self, session: aiohttp.ClientSession, messages: list[dict], *, use_tools: bool = True, max_tokens: int | None = None) -> dict:
         # Один HTTP-запрос модели. Начальный "_" обозначает внутренний метод
         # по соглашению, а не запрещает доступ, как private в Java.
         started = time.monotonic()
         logger.info("Model request started")
         payload = {
-            "model": self.model, "messages": messages, "max_tokens": 1600,
+            "model": self.model, "messages": messages, "max_tokens": max_tokens or (1600 if use_tools else 4096),
         }
+        if not use_tools:
+            payload['reasoning'] = {"effort": "low"}
         if use_tools:
             payload.update(tools=TOOLS, tool_choice="auto")
         async with session.post(
@@ -121,7 +134,9 @@ class Agent:
         try:
             choice = data["choices"][0]
             if choice.get("finish_reason") == "length":
-                raise AgentError("Модели не хватило длины ответа. Попробуй более короткий запрос.")
+                logger.warning("Model output limit; stage=%s; model=%s; usage=%s",
+                               'tools' if use_tools else 'story', data.get('model'), data.get('usage'))
+                raise ModelOutputLimit("Модель исчерпала лимит генерации и не завершила ответ. Попробуй повторить запрос.")
             message = choice["message"]
             if not isinstance(message, dict):
                 raise ValueError()
@@ -130,6 +145,19 @@ class Agent:
             return message
         except (KeyError, IndexError, TypeError, ValueError):
             raise AgentError("Модель вернула непонятный ответ. Попробуй ещё раз.") from None
+
+    async def _tell_story(self, session, request, documents, attempts):
+        messages = self.stories.messages(request, documents)
+        for attempt in range(attempts):
+            try:
+                # Один повтор только при обрыве. Он входит в общий лимит четырёх
+                # запросов harness; обрезанный JSON никогда не публикуется.
+                story = await self._complete(session, messages, use_tools=False,
+                                             max_tokens=4096 if attempt == 0 else 8192)
+                return self.stories.render(story.get('content'), documents)
+            except ModelOutputLimit:
+                continue
+        return self.stories.excerpts(documents)
 
     async def _tool(self, name: str, arguments: str) -> dict:
         # Выполняем только известную функцию. Модель передаёт имя и JSON
@@ -159,7 +187,48 @@ class Agent:
                         "start": e["start"], "end": e["end"]} for e in events[:100]],
         }
 
-    async def reply(self, text: str) -> str | EventDraft:
+    async def finish_choice(self, choice, key, attempts=2):
+        if choice.action == "route":
+            if key == "find":
+                answer = await self.place_search.search(SearchRequest(query=choice.mention[:500]))
+            elif choice.walk:
+                answer = await self.tourism.plan(choice.walk)
+            else:
+                return replace(choice, action="duration", options=("60", "120", "180"))
+        elif choice.action == "duration":
+            answer = await self.tourism.plan(WalkRequest(budget_minutes=int(key), start_id=choice.start_id, return_to_start=choice.return_to_start))
+        elif choice.action == "walk":
+            if choice.walk is None:
+                return replace(choice, action="duration", options=("60", "120", "180"), start_id=key)
+            answer = await self.tourism.plan(choice.walk.model_copy(update={"start_id": key}))
+        else:
+            name = PLACES[key]
+            question = choice.question.replace(choice.mention, name) if choice.mention else choice.question
+            request = StoryRequest(place_id=key, question=question[:500])
+            documents = await self.stories.retrieve_async(request)
+            if not documents:
+                return "Для этого места пока нет источников в базе."
+            if not self.api_key:
+                return self.stories.excerpts(documents)
+            async with asyncio.timeout(150), aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {self.api_key}"}, timeout=aiohttp.ClientTimeout(total=60)
+            ) as session:
+                answer = await self._tell_story(session, request, documents, attempts=attempts)
+        if choice.action in ("story", "walk"):
+            answer = f"Выбрано место: {PLACES[key]}.\n\n{answer}"
+        await self.history.append([{"role": "user", "content": choice.question},
+                                   {"role": "assistant", "content": answer}])
+        return answer
+
+    async def resolve_choice(self, choice, attempts=2):
+        if choice.action == "route":
+            return choice
+        key, _, options = match_place(choice.mention)
+        if key:
+            return await self.finish_choice(choice, key, attempts)
+        return replace(choice, options=options)
+
+    async def reply(self, text: str) -> str | EventDraft | PlaceChoice:
         # Вход для сообщения из Telegram. str | EventDraft — два допустимых
         # вида результата: готовый текст либо DTO для подтверждения кнопкой.
         if len(text) > 4000:
@@ -178,6 +247,12 @@ class Agent:
             await self.history.append([{"role": "user", "content": f"[{now.isoformat()}] {text}"},
                                        {"role": "assistant", "content": answer}])
             return answer
+        choice = local_request(text) if self.tourism else None
+        if choice:
+            try:
+                return await self.resolve_choice(choice)
+            except (TimeoutError, aiohttp.ClientError, WalkingError, SearchError) as exc:
+                raise AgentError(str(exc) or "Не удалось завершить запрос. Попробуй ещё раз.") from None
         if not self.api_key:
             raise AgentError("Модель ещё не подключена: добавь OPENROUTER_API_KEY. Команда /today работает отдельно.")
         system = (
@@ -213,6 +288,7 @@ class Agent:
             "Каталог: station вокзал → university ГрГУ Ожешко 22 → gilibert_park парк Жилибера → "
             "lenin_square площадь Ленина → soviet_square Советская площадь → drama_theatre драмтеатр → "
             "old_castle Старый замок → new_castle Новый замок. Для подробностей используй list_places. "
+            "Для подбора мест по интересам или смыслу запроса вызови search_places, сохраняя пожелания пользователя. "
             "Для расчёта прогулки ОБЯЗАТЕЛЬНО вызови plan_city_walk; не сочиняй время и расстояния. "
             "Спроси бюджет (1–3 часа), если его нет. Указывай return_to_start=true только по просьбе пользователя. "
             "Маршрут сохраняет порядок каталога, может сокращаться; музеи внутри, кафе, произвольные адреса "
@@ -220,6 +296,10 @@ class Agent:
             "Для истории места ОБЯЗАТЕЛЬНО вызови tell_place_story с полным вопросом пользователя; "
             "не отвечай исторические факты из памяти или старой истории. Если сказано только «замок», уточни какой. "
             "В ответах пользователю не показывай имена внутренних инструментов и детали API."
+            " Материалы для базы знаний добавляют командой /learn, затем текстом или TXT/Markdown "
+            "и кнопкой подтверждения. /materials показывает список и удаление, /cancel_material отменяет загрузку. "
+            "Ты не можешь добавлять документы своими инструментами и не должен утверждать, что сохранил текст. "
+            "Для рассказа по загруженным знаниям используй tell_place_story; если нужно найти подходящее место, используй search_places."
         )
         # * распаковывает список истории в новый список сообщений.
         # Историю читаем заново, чтобы учесть результаты нажатий кнопок.
@@ -252,32 +332,36 @@ class Agent:
                         messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": calls})
                         for call in calls:
                             name = call["function"]["name"]
-                            if name in ("plan_city_walk", "tell_place_story"):
+                            if name in ("plan_city_walk", "tell_place_story", "search_places"):
                                 # Терминальные инструменты: числовой план не отдаём
                                 # модели на переписывание. RAG получает отдельный
                                 # чистый контекст без календаря и старых рассказов.
                                 if self.tourism is None:
                                     raise AgentError("Прогулки пока не настроены.")
                                 try:
-                                    if name == "plan_city_walk":
+                                    if name == "search_places":
+                                        request = SearchRequest.model_validate_json(call["function"]["arguments"])
+                                        answer = await self.place_search.search(request)
+                                    elif name == "plan_city_walk":
                                         request = WalkRequest.model_validate_json(call["function"]["arguments"])
+                                        mention = mention_in(text, "walk")
+                                        if not mention and request.start_id != "station":
+                                            return PlaceChoice("walk", text, "", (request.start_id,), request)
+                                        if mention:
+                                            return await self.resolve_choice(PlaceChoice("walk", text, mention, (), request))
                                         answer = await self.tourism.plan(request)
                                     else:
                                         request = StoryRequest.model_validate_json(call["function"]["arguments"])
                                         # Точный пользовательский запрос не теряется,
                                         # даже если модель сократила аргумент question.
-                                        request.question = text[:500]
-                                        documents = self.stories.retrieve(request)
-                                        if not documents:
-                                            answer = "Для этого места пока нет источников в базе."
-                                        else:
-                                            if step >= 3:
-                                                raise AgentError("Достигнут лимит запросов. Попроси рассказ об одном месте отдельным сообщением.")
-                                            story = await self._complete(session, self.stories.messages(request, documents), use_tools=False)
-                                            answer = self.stories.render(story.get("content"), documents)
+                                        mention = mention_in(text, "story")
+                                        if mention:
+                                            return await self.resolve_choice(PlaceChoice("story", text, mention, ()), min(2, 3-step))
+                                        # Если фраза сложнее шаблона, решение модели лишь кандидат.
+                                        return PlaceChoice("story", text, "", (request.place_id,))
                                 except ValidationError:
-                                    raise AgentError("Уточни место из /places и длительность прогулки от 60 до 180 минут.") from None
-                                except WalkingError as exc:
+                                    raise AgentError("Уточни запрос: что ищешь, о каком месте рассказать или сколько минут выделить на прогулку.") from None
+                                except (WalkingError, SearchError) as exc:
                                     raise AgentError(str(exc)) from None
                                 await self.history.append([
                                     {"role": "user", "content": f"[{now.isoformat()}] {text}"},
