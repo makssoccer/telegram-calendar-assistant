@@ -42,6 +42,21 @@ class Settings(DatabaseSettings):
     google_calendar_id: str = "primary"
     google_token_path: Path = Path("secrets/google-token.json")
     openrouter_api_key: SecretStr = SecretStr("")
+    openrouter_key_file: Path | None = None
+
+    @field_validator("openrouter_key_file", mode="before")
+    @classmethod
+    def optional_key_file(cls, value):
+        return value or None
+
+    def router_key(self) -> str:
+        if self.openrouter_key_file:
+            key = self.openrouter_key_file.read_text(encoding="utf-8-sig").strip()
+            if not key:
+                raise ValueError("Empty OpenRouter secret file")
+            return key
+        return self.openrouter_api_key.get_secret_value()
+
     openrouter_model: str = "openrouter/free"
     ors_api_key: SecretStr = SecretStr("")
 
