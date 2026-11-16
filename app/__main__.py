@@ -20,6 +20,7 @@ from app.storage import check_database, create_engine
 from app.telegram_bot import create_dispatcher
 from app.tourism import TourismService
 from app.walking import WalkingClient
+from app.usage_guard import UsageGuard
 from app.knowledge import KnowledgeStore
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,14 @@ async def run(settings: Settings) -> None:
             calendar = CalendarService(settings.google_calendar_id, settings.google_token_path, settings.user_timezone)
             tourism = TourismService(WalkingClient(settings.ors_api_key.get_secret_value()))
             knowledge = KnowledgeStore(engine, settings.owner_telegram_id)
-            agent = Agent(calendar, settings.openrouter_api_key.get_secret_value(), settings.openrouter_model,
-                          HistoryStore(engine, settings.owner_telegram_id), tourism, knowledge)
+            guard = UsageGuard(engine, settings.owner_telegram_id)
+            agent = Agent(calendar, settings.router_key(), settings.openrouter_model,
+                          HistoryStore(engine, settings.owner_telegram_id), tourism, knowledge, guard)
             reminder_store = ReminderStore(engine, settings.owner_telegram_id, settings.google_calendar_id)
             await reminder_store.initialize()
             reminders = ReminderService(calendar, bot, reminder_store)
             dispatcher = create_dispatcher(settings.owner_telegram_id, calendar, agent, DraftStore(engine), reminders, knowledge)
+            dispatcher.update.outer_middleware(guard.on_update)
             # create_task запускает фоновую корутину в том же event loop.
             worker = asyncio.create_task(reminders.run(), name="calendar-reminders")
             try:

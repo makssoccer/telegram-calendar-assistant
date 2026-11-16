@@ -25,14 +25,18 @@ class SearchError(Exception):
 
 
 def load_model(*, download=False):
-    # FastEmbed запускает ONNX на CPU. PyTorch, GPU и API-ключ не нужны.
+    # Через FastEmbed мы передаём текст модели E5. ONNX Runtime выполняет
+    # вычисления модели локально на CPU.
     from fastembed import TextEmbedding
     from fastembed.common.model_description import ModelSource, PoolingType
     if not any(m["model"] == MODEL for m in TextEmbedding.list_supported_models()):
+        # MEAN усредняет векторы токенов в один вектор текста из 384 чисел
+        # (как float[384] в Java). normalization=True приводит его длину к 1.
         TextEmbedding.add_custom_model(
             model=MODEL, pooling=PoolingType.MEAN, normalization=True,
             sources=ModelSource(hf=MODEL), dim=384, model_file="onnx/model.onnx",
         )
+    # Здесь на диске лежат веса модели. При обычном поиске читаем их из кэша.
     cache = os.environ.get("EMBEDDING_CACHE", str(Path.home() / ".cache" / "assistant-embeddings"))
     return TextEmbedding(model_name=MODEL, cache_dir=cache, threads=2,
                          local_files_only=not download)
@@ -47,6 +51,7 @@ class PlaceSearch:
         self.knowledge = knowledge
         self._model = None
         self._vectors = {}
+        self._intent_vectors = {}
         self._lock = threading.Lock()
 
     async def search(self, request: SearchRequest) -> str:
@@ -85,6 +90,18 @@ class PlaceSearch:
                     break
         return hits
 
+    def intent_scores(self, query, examples):
+        # Модель общая с /find, а эталоны намерений имеют собственный кэш.
+        with self._lock:
+            if self._model is None:
+                self._model = load_model()
+            for label, phrases in examples.items():
+                if label not in self._intent_vectors:
+                    vectors = self._model.embed(["passage: " + phrase for phrase in phrases])
+                    self._intent_vectors[label] = np.stack(list(vectors))
+            vector = next(iter(self._model.embed(["query: " + query])))
+            return {label: float(np.max(matrix @ vector)) for label, matrix in self._intent_vectors.items()}
+
     def rank_fragments(self, query, documents):
         # Рассказчику нужны разные фрагменты одного места, поэтому здесь нет группировки.
         if not documents:
@@ -94,17 +111,24 @@ class PlaceSearch:
             if self._model is None:
                 self._model = load_model()
             texts = [f"{self.places[d['place_id']]['name']}. {d['title']}. {d['text']}" for d in documents]
-            # Ключ — сам текст: новые/изменённые материалы пересчитываются,
-            # удалённые вычищаются. Векторы живут в памяти, оригиналы — в PostgreSQL.
+            # В памяти храним пары «текст → embedding». Для прежнего текста
+            # вектор уже готов, а изменение заголовка или фрагмента создаёт новый ключ.
             missing = list(dict.fromkeys(t for t in texts if t not in self._vectors))
             if missing:
+                # Префикс passage: обозначает материал для поиска. embed выдаёт
+                # по вектору на текст в том же порядке, обрабатывая до 8 текстов за раз.
                 vectors = self._model.embed(["passage: " + t for t in missing], batch_size=8)
                 self._vectors.update(zip(missing, vectors, strict=True))
             self._vectors = {t: self._vectors[t] for t in texts}
+            # Префикс query: обозначает вопрос пользователя. Передали один
+            # вопрос, поэтому next берёт единственный вектор из результата embed.
             q = next(iter(self._model.embed(["query: " + query])))
-            # Нормализованные векторы: скалярное произведение равно cosine similarity.
-            # Это мера близости, НЕ вероятность правильного ответа.
+            # np.stack собирает таблицу из N строк по 384 числа. Оператор @
+            # умножает каждую строку на вектор вопроса и суммирует произведения
+            # соответствующих координат. Для векторов длины 1 это косинусное сходство.
             scores = np.stack([self._vectors[t] for t in texts]) @ q
+            # scores[i] относится к documents[i]. Сортировка по -scores ставит
+            # наиболее близкие по смыслу фрагменты первыми.
             return [(float(scores[i]), documents[i]) for i in np.argsort(-scores, kind="stable")]
 
 

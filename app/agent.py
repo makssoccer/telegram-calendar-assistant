@@ -9,6 +9,7 @@ import aiohttp
 from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError, model_validator
 
 from app.calendar import CalendarError, CalendarService, format_events
+from app.intent_filter import check_intent, explicit_refusal
 from app.date_queries import schedule_day
 from app.meeting_time import explicit_meeting_time
 from app.drafts import EventDraft
@@ -20,12 +21,9 @@ from dataclasses import replace
 from app.place_choice import PlaceChoice, PLACES, local_request, match_place, mention_in
 from app.place_search import PlaceSearch, SearchRequest, SearchError
 
+from app.usage_guard import AgentError, bounded_action, consume_call, MAX_PAYLOAD_BYTES, tool_content
+
 logger = logging.getLogger(__name__)
-
-
-class AgentError(Exception):
-    # Прикладное исключение: обработчик Telegram покажет его текст пользователю.
-    pass
 
 
 class ModelOutputLimit(AgentError):
@@ -86,7 +84,8 @@ class Agent:
     # Основной harness: координирует модель, инструменты и историю разговора.
     # Сам не пишет в календарь: возвращает черновик для подтверждения в Telegram.
     def __init__(self, calendar: CalendarService, api_key: str, model: str, history,
-                 tourism: TourismService | None = None, knowledge=None):
+                 tourism: TourismService | None = None, knowledge=None, usage_guard=None):
+        self.usage_guard = usage_guard
         # __init__ инициализирует объект (похож на конструктор Java).
         # Зависимости передаются извне; их собирает app/__main__.py.
         self.calendar = calendar
@@ -114,8 +113,15 @@ class Agent:
             payload['reasoning'] = {"effort": "low"}
         if use_tools:
             payload.update(tools=TOOLS, tool_choice="auto")
-        async with session.post(
-            "https://openrouter.ai/api/v1/chat/completions", json=payload,
+        payload["provider"] = {"allow_fallbacks": False, "max_price": {"prompt": 0, "completion": 0, "request": 0}}
+        size = len(json.dumps(payload, ensure_ascii=False).encode())
+        if size > MAX_PAYLOAD_BYTES:
+            raise AgentError("Контекст слишком большой. Уточни запрос или очисти историю командой /reset.")
+        if self.usage_guard is None:
+            raise AgentError("Хранилище лимитов модели не настроено.")
+        consume_call()
+        async with self.usage_guard.admission(size + payload["max_tokens"]), session.post(
+            "https://openrouter.ai/api/v1/chat/completions", json=payload, allow_redirects=False,
         ) as response:
             # async with освобождает ресурс и при исключении:
             # аналогия с Java — try-with-resources.
@@ -187,6 +193,7 @@ class Agent:
                         "start": e["start"], "end": e["end"]} for e in events[:100]],
         }
 
+    @bounded_action
     async def finish_choice(self, choice, key, attempts=2):
         if choice.action == "route":
             if key == "find":
@@ -228,6 +235,7 @@ class Agent:
             return await self.finish_choice(choice, key, attempts)
         return replace(choice, options=options)
 
+    @bounded_action
     async def reply(self, text: str) -> str | EventDraft | PlaceChoice:
         # Вход для сообщения из Telegram. str | EventDraft — два допустимых
         # вида результата: готовый текст либо DTO для подтверждения кнопкой.
@@ -247,12 +255,19 @@ class Agent:
             await self.history.append([{"role": "user", "content": f"[{now.isoformat()}] {text}"},
                                        {"role": "assistant", "content": answer}])
             return answer
+        refusal = explicit_refusal(text)
+        if refusal:
+            return refusal
         choice = local_request(text) if self.tourism else None
         if choice:
             try:
                 return await self.resolve_choice(choice)
             except (TimeoutError, aiohttp.ClientError, WalkingError, SearchError) as exc:
                 raise AgentError(str(exc) or "Не удалось завершить запрос. Попробуй ещё раз.") from None
+        history = await self.history.load()
+        local_answer = await check_intent(text, history, self.place_search)
+        if local_answer:
+            return local_answer
         if not self.api_key:
             raise AgentError("Модель ещё не подключена: добавь OPENROUTER_API_KEY. Команда /today работает отдельно.")
         system = (
@@ -304,7 +319,7 @@ class Agent:
         # * распаковывает список истории в новый список сообщений.
         # Историю читаем заново, чтобы учесть результаты нажатий кнопок.
         # system — инструкции; user — запрос; assistant — ответ модели.
-        messages = [{"role": "system", "content": system}, *(await self.history.load()),
+        messages = [{"role": "system", "content": system}, *history,
                     {"role": "user", "content": text}]
         try:
             async with asyncio.timeout(150):
@@ -312,6 +327,7 @@ class Agent:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as session:
+                    seen_actions = set()
                     calls_used = 0
                     for step in range(4):
                         # Цикл: модель → инструмент → модель. Лимит предотвращает
@@ -332,6 +348,15 @@ class Agent:
                         messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": calls})
                         for call in calls:
                             name = call["function"]["name"]
+                            arguments = call["function"]["arguments"]
+                            try:
+                                canonical = json.dumps(json.loads(arguments), sort_keys=True, ensure_ascii=False)
+                            except ValueError:
+                                canonical = arguments.strip()
+                            signature = (name, canonical)
+                            if signature in seen_actions:
+                                raise AgentError("Модель повторила тот же вызов инструмента. Уточни запрос.")
+                            seen_actions.add(signature)
                             if name in ("plan_city_walk", "tell_place_story", "search_places"):
                                 # Терминальные инструменты: числовой план не отдаём
                                 # модели на переписывание. RAG получает отдельный
@@ -397,7 +422,7 @@ class Agent:
                             # tool_call_id связывает результат инструмента
                             # с конкретным вызовом, предложенным моделью.
                             messages.append({"role": "tool", "tool_call_id": call["id"],
-                                             "content": json.dumps(result, ensure_ascii=False)})
+                                             "content": tool_content(result)})
         except (TimeoutError, aiohttp.ClientError):
             raise AgentError("Модель не ответила вовремя или сеть недоступна. Попробуй позже; /today работает без модели.") from None
         except (KeyError, TypeError, ValueError):
