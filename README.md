@@ -112,3 +112,5 @@ docker compose run --rm --no-deps bot /app/.venv/bin/python -m app.voice_worker 
 Веса сохраняются в volume `whisper_models`. Временное аудио удаляется после обработки.
 
 Смысловой поиск мест: `/find места, связанные с королями`. Локальные embeddings, материалы из `/learn`, ссылки на карту. [Настройка и устройство](docs/SEMANTIC_SEARCH.md).
+
+[Защита API-ключей и контроль расхода токенов](docs/TOKEN_PROTECTION.md)
